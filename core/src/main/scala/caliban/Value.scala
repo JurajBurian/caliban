@@ -1,7 +1,9 @@
 package caliban
 
+
 import caliban.Value._
 import caliban.interop.circe._
+import io.circe.{Encoder, Json}
 import zio.stream.Stream
 
 import scala.util.Try
@@ -14,6 +16,8 @@ object InputValue {
 
   implicit def circeDecoder[F[_]: IsCirceDecoder]: F[InputValue] =
     ValueCirce.inputValueDecoder.asInstanceOf[F[InputValue]]
+
+  val  circeEncoder: Encoder[InputValue] = ValueCirce.inputValueEncoder
 }
 
 sealed trait ResponseValue
@@ -35,6 +39,11 @@ object ResponseValue {
 
 sealed trait Value extends InputValue with ResponseValue
 object Value {
+
+  trait GenericScalar[T] extends Value {
+    def toJson: Json
+  }
+
   case object NullValue extends Value {
     override def toString: String = "null"
   }
@@ -129,6 +138,30 @@ private object ValueCirce {
       obj => InputValue.ObjectValue(obj.toMap.map { case (k, v) => k -> jsonToValue(v) })
     )
   val inputValueDecoder: Decoder[InputValue] = Decoder.instance(hcursor => Right(jsonToValue(hcursor.value)))
+  val inputValueEncoder: Encoder[InputValue] = Encoder
+    .instance[InputValue]({
+      case Value.NullValue => Json.Null
+      case v: IntValue =>
+        v match {
+          case Value.IntValue.IntNumber(value)    => Json.fromInt(value)
+          case Value.IntValue.LongNumber(value)   => Json.fromLong(value)
+          case Value.IntValue.BigIntNumber(value) => Json.fromBigInt(value)
+        }
+      case v: Value.FloatValue =>
+        v match {
+          case Value.FloatValue.FloatNumber(value)      => Json.fromFloatOrNull(value)
+          case Value.FloatValue.DoubleNumber(value)     => Json.fromDoubleOrNull(value)
+          case Value.FloatValue.BigDecimalNumber(value) => Json.fromBigDecimal(value)
+        }
+      case Value.StringValue(value)              => Json.fromString(value)
+      case Value.BooleanValue(value)             => Json.fromBoolean(value)
+      case Value.EnumValue(value)                => Json.fromString(value)
+      case InputValue.ListValue(values) => Json.arr(values.map(inputValueEncoder.apply): _*)
+      case InputValue.ObjectValue(fields) =>
+        Json.obj(fields.map { case (k, v) => k -> inputValueEncoder.apply(v) }.toSeq: _*)
+      case s:GenericScalar[_] => s.toJson
+      case _:InputValue.VariableValue => throw new IllegalArgumentException("VariableValue is not supported in this context.")
+    })
   val responseValueEncoder: Encoder[ResponseValue] = Encoder
     .instance[ResponseValue]({
       case NullValue => Json.Null
@@ -151,5 +184,6 @@ private object ValueCirce {
       case ResponseValue.ObjectValue(fields) =>
         Json.obj(fields.map { case (k, v) => k -> responseValueEncoder.apply(v) }: _*)
       case s: ResponseValue.StreamValue => Json.fromString(s.toString)
+      case s:GenericScalar[_] => s.toJson
     })
 }
